@@ -68,9 +68,12 @@ void OnTimer()
    for(int i = 0; i < k; i++)
    {
       nTicks++;
-      if(t[i].volume_real > 0 || t[i].volume > 0) nTicksWithVolume++;
-      if((t[i].flags & TICK_FLAG_BUY) != 0)  nBuyAggr++;
-      if((t[i].flags & TICK_FLAG_SELL) != 0) nSellAggr++;
+      // agressão só conta se o tick for um negócio real (preço "last" e volume)
+      bool deal = (t[i].volume_real > 0 || t[i].volume > 0) && t[i].last > 0;
+      if(deal) nTicksWithVolume++;
+      bool buy = deal && (t[i].flags & TICK_FLAG_BUY) != 0, sell = deal && (t[i].flags & TICK_FLAG_SELL) != 0;
+      if(buy && !sell) nBuyAggr++;
+      if(sell && !buy) nSellAggr++;
       lastTickMsc = t[i].time_msc;
    }
 
