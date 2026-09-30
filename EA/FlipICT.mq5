@@ -22,16 +22,19 @@ input double InpCapital = 3000;   // Capital do flip por dia ($). 0 = saldo inte
 #define KZ_NY_START      (7*60)
 #define KZ_NY_END        (10*60)
 #define ASIA_START       (20*60)   // range da Ásia: 20:00-00:00 NY
+#define LON_START        (2*60)    // range de Londres (liquidez para a killzone de NY)
+#define LON_END          (5*60)
 #define DAY_START        (18*60)   // dia de negociação começa 18:00 NY
 #define CLOSE_ALL        (16*60)   // fecha tudo 16:00 NY
 const ENUM_TIMEFRAMES TF = PERIOD_M5;
-const int    SWING_LB      = 10;     // candles p/ topo/fundo que o MSS precisa romper
-const int    MAX_AFTER     = 24;     // candles máx. entre varredura e MSS
+const int    SWING_LB      = 3;      // candles p/ topo/fundo que o MSS precisa romper
+const int    MAX_AFTER     = 36;     // candles máx. entre varredura e MSS
 const double MIN_FVG_ATR   = 0.10;   // tamanho mínimo do FVG (x ATR14)
-const double ENTRY_FRAC    = 0.0;    // 0 = borda do FVG, 0.5 = meio
+const bool   MARKET_ENTRY  = true;   // entra a mercado na quebra (MSS) após confirmar o FVG
+const double ENTRY_FRAC    = 0.0;    // se ordem limite: 0 = borda do FVG, 0.5 = meio
 const double SL_BUF_ATR    = 0.10;   // folga do stop além do extremo (x ATR14)
 const double RISK_FRAC     = 0.95;   // risco da 1ª entrada (fração do capital)
-const double ADD_TRIGGER_R = 1.0;    // adiciona após andar X vezes o stop inicial
+const double ADD_TRIGGER_R = 1.5;    // adiciona após andar X vezes o stop inicial
 const double LOCK_FRAC     = 0.30;   // fração do lucro flutuante travada a cada adição
 const int    MAX_ADDS      = 8;
 const long   MAGIC         = 77007700;
@@ -49,8 +52,8 @@ bool     tradedToday = false;
 bool     dayFinished = false;
 string   dayStatus = "";
 
-double asiaH = 0, asiaL = 0, pdh = 0, pdl = 0;
-bool   takenAsiaH, takenAsiaL, takenPDH, takenPDL;
+double asiaH = 0, asiaL = 0, pdh = 0, pdl = 0, lonH = 0, lonL = 0;
+bool   takenAsiaH, takenAsiaL, takenPDH, takenPDL, takenLonH, takenLonL;
 
 struct Arm { bool on; double ext; datetime extTime; double ref; int bars; };
 Arm armBuy, armSell;
@@ -121,8 +124,8 @@ void NewDay(datetime tds, datetime ny)
    pdh = pdl = 0;
    for(int k = 0; k < 4; k++, to -= 86400, from -= 86400)
       if(RangeHL(from, to, pdh, pdl)) break;
-   asiaH = asiaL = 0;
-   takenAsiaH = takenAsiaL = false; takenPDH = takenPDL = (pdh == 0);
+   asiaH = asiaL = 0; lonH = lonL = 0;
+   takenAsiaH = takenAsiaL = takenLonH = takenLonL = false; takenPDH = takenPDL = (pdh == 0);
    // se o EA iniciou no meio do dia, níveis já rompidos não contam
    double hi, lo;
    if(ny > tds && RangeHL(tds, ny, hi, lo)) UpdateTaken(hi, lo);
@@ -294,6 +297,8 @@ void UpdateTaken(double hi, double lo)
    if(asiaL > 0 && lo < asiaL) takenAsiaL = true;
    if(pdh > 0 && hi > pdh) takenPDH = true;
    if(pdl > 0 && lo < pdl) takenPDL = true;
+   if(lonH > 0 && hi > lonH) takenLonH = true;
+   if(lonL > 0 && lo < lonL) takenLonL = true;
 }
 
 //+------------------------------------------------------------------+
@@ -319,11 +324,13 @@ void CheckSetup(const MqlRates &r[], double atr, int nyMin, datetime ny)
          {
             if(!takenAsiaL && asiaL > 0 && r[1].low < asiaL) { takenAsiaL = true; swept = true; }
             if(!takenPDL && pdl > 0 && r[1].low < pdl)       { takenPDL = true;   swept = true; }
+            if(!takenLonL && lonL > 0 && r[1].low < lonL)    { takenLonL = true;  swept = true; }
          }
          else
          {
             if(!takenAsiaH && asiaH > 0 && r[1].high > asiaH) { takenAsiaH = true; swept = true; }
             if(!takenPDH && pdh > 0 && r[1].high > pdh)       { takenPDH = true;   swept = true; }
+            if(!takenLonH && lonH > 0 && r[1].high > lonH)    { takenLonH = true;  swept = true; }
          }
          if(swept)
          {
@@ -371,7 +378,7 @@ void PlaceEntry(int dir, double entry, double sl, datetime ny)
    entry = NormalizeDouble(entry, _Digits); sl = NormalizeDouble(sl, _Digits);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK), bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double stops = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   bool market = (dir > 0) ? (ask <= entry + stops) : (bid >= entry - stops);
+   bool market = MARKET_ENTRY || ((dir > 0) ? (ask <= entry + stops) : (bid >= entry - stops));
    double px = market ? (dir > 0 ? ask : bid) : entry;
    if((px - sl) * dir <= stops) return;
 
@@ -493,6 +500,16 @@ void OnTick()
                   if(RangeHL(mid, ny, hi, lo)) UpdateTaken(hi, lo);
                }
             }
+            // range de Londres fica pronto às 05:00 NY
+            if(lonH == 0 && MinOfDay(ny) >= LON_END && MinOfDay(ny) < DAY_START)
+            {
+               datetime mid = Midnight(ny);
+               if(RangeHL(mid + LON_START * 60, mid + LON_END * 60, lonH, lonL))
+               {
+                  double hi, lo;
+                  if(RangeHL(mid + LON_END * 60, ny, hi, lo)) UpdateTaken(hi, lo);
+               }
+            }
             int barMin = MinOfDay(ToNY(r[1].time));
             if(basketActive) ManagePyramid(r, atrb[0]);
             else if(!tradedToday && !dayFinished && !closeWindow) CheckSetup(r, atrb[0], barMin, ny);
@@ -509,11 +526,11 @@ void ShowPanel(double eq, double target)
       "FlipICT  |  %s  |  alvo %.0fx\n"
       "Capital do dia: %.2f   Alvo: %.2f\n"
       "Patrimônio: %.2f   (%.2fx)\n"
-      "Ásia H/L: %s / %s   Dia ant. H/L: %s / %s\n"
+      "Ásia H/L: %s / %s   Londres H/L: %s / %s   Dia ant. H/L: %s / %s\n"
       "Adições: %d/%d\n"
       "Status: %s",
       _Symbol, InpAlvo, dayBase, target, eq, dayBase > 0 ? (dayBase + eq - AccountInfoDouble(ACCOUNT_BALANCE)) / dayBase : 0,
-      DoubleToString(asiaH, _Digits), DoubleToString(asiaL, _Digits), DoubleToString(pdh, _Digits), DoubleToString(pdl, _Digits),
+      DoubleToString(asiaH, _Digits), DoubleToString(asiaL, _Digits), DoubleToString(lonH, _Digits), DoubleToString(lonL, _Digits), DoubleToString(pdh, _Digits), DoubleToString(pdl, _Digits),
       bAdds, MAX_ADDS, dayStatus));
 }
 
